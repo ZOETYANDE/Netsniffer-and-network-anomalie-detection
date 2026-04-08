@@ -16,7 +16,7 @@ TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 HOSTNAME_VAL=$(hostname 2>/dev/null || echo "unknown")
 USER_VAL=$(whoami 2>/dev/null || echo "unknown")
 KERNEL_VAL=$(uname -r 2>/dev/null || echo "unknown")
-OS_VAL=$(cat /etc/os-release 2>/dev/null | grep -E '^PRETTY_NAME=' | cut -d'"' -f2 || uname -s 2>/dev/null || echo "unknown")
+OS_VAL=$(grep -E '^PRETTY_NAME=' /etc/os-release 2>/dev/null | cut -d'"' -f2 || uname -s 2>/dev/null || echo "unknown")
 
 # Colors
 RED='\033[0;31m'
@@ -67,7 +67,7 @@ banner() {
 log_info()  { [[ "$QUIET" == true ]] || echo -e "${GREEN}[+]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
 log_error() { echo -e "${RED}[-]${NC} $1" >&2; }
-log_debug() { [[ "$VERBOSE" == true ]] && echo -e "${DIM}[D] $1${NC}"; }
+log_debug() { [[ "$VERBOSE" == true ]] && echo -e "${DIM}[D] $1${NC}" || true; }
 
 usage() {
     cat <<EOF
@@ -137,7 +137,9 @@ parse_yaml_list() {
     local indent=""
     local results=()
 
-    while IFS= read -r line; do
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Strip Windows carriage returns
+        line="${line%$'\r'}"
         # Skip comments and empty lines
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${line// /}" ]] && continue
@@ -167,7 +169,9 @@ parse_yaml_list() {
         fi
     done < "$file"
 
-    printf '%s\n' "${results[@]}"
+    if [[ ${#results[@]} -gt 0 ]]; then
+        printf '%s\n' "${results[@]}"
+    fi
 }
 
 parse_yaml_value() {
@@ -176,7 +180,7 @@ parse_yaml_value() {
     local key="$2"
     local val
 
-    val=$(grep -E "^\s*${key}:" "$file" 2>/dev/null | head -1 | sed "s/.*${key}:\s*//;s/[\"']//g;s/\s*#.*//;s/\s*$//" || true)
+    val=$(grep -E "^[[:space:]]*${key}:" "$file" 2>/dev/null | head -1 | sed "s/.*${key}:[[:space:]]*//;s/[\"']//g;s/[[:space:]]*#.*//;s/[[:space:]]*$//;s/\r//" || true)
     echo "$val"
 }
 
@@ -252,15 +256,29 @@ collect_data() {
     # Get host info
     local h_hostname h_user h_kernel h_os h_timestamp
     h_timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    h_hostname=$(${ssh_prefix} hostname 2>/dev/null || echo "$host_label")
-    h_user=$(${ssh_prefix} whoami 2>/dev/null || echo "unknown")
-    h_kernel=$(${ssh_prefix} uname -r 2>/dev/null || echo "unknown")
-    h_os=$(${ssh_prefix} bash -c 'cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d\" -f2 || uname -s' 2>/dev/null || echo "unknown")
+    if [[ -n "$ssh_prefix" ]]; then
+        h_hostname=$(${ssh_prefix} hostname 2>/dev/null || echo "$host_label")
+        h_user=$(${ssh_prefix} whoami 2>/dev/null || echo "unknown")
+        h_kernel=$(${ssh_prefix} uname -r 2>/dev/null || echo "unknown")
+        h_os=$(${ssh_prefix} bash -c 'grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d\" -f2 || uname -s' 2>/dev/null || echo "unknown")
+    else
+        h_hostname=$(hostname 2>/dev/null || echo "$host_label")
+        h_user=$(whoami 2>/dev/null || echo "unknown")
+        h_kernel=$(uname -r 2>/dev/null || echo "unknown")
+        h_os=$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'"' -f2 || uname -s 2>/dev/null || echo "unknown")
+    fi
 
     # ── 1. Machine Info ──
     log_info "  Collecting network interfaces..."
-    local ip_addr_out=$(run_cmd "${ssh_prefix} ip a")
-    local resolv_out=$(run_cmd "${ssh_prefix} cat /etc/resolv.conf")
+    local ip_addr_out
+    local resolv_out
+    if [[ -n "$ssh_prefix" ]]; then
+        ip_addr_out=$(run_cmd "${ssh_prefix} ip a")
+        resolv_out=$(run_cmd "${ssh_prefix} cat /etc/resolv.conf")
+    else
+        ip_addr_out=$(run_cmd "ip a")
+        resolv_out=$(run_cmd "cat /etc/resolv.conf")
+    fi
 
     # ── 2. DNS Lookups ──
     log_info "  Running DNS lookups for ${#DOMAINS[@]} domains..."
@@ -269,8 +287,13 @@ collect_data() {
     for i in "${!DOMAINS[@]}"; do
         domain="${DOMAINS[$i]}"
         log_info "    -> nslookup + dig ${domain}"
-        ns_out=$(run_cmd "${ssh_prefix} nslookup ${domain}")
-        dig_out=$(run_cmd "${ssh_prefix} dig ${domain} +stats +time=5")
+        if [[ -n "$ssh_prefix" ]]; then
+            ns_out=$(run_cmd "${ssh_prefix} nslookup ${domain}")
+            dig_out=$(run_cmd "${ssh_prefix} dig ${domain} +stats +time=5")
+        else
+            ns_out=$(run_cmd "nslookup ${domain}")
+            dig_out=$(run_cmd "dig ${domain} +stats +time=5")
+        fi
 
         sep=""; [[ $i -gt 0 ]] && sep=","
         nslookup_results="${nslookup_results}${sep}{\"domain\":\"${domain}\",\"output\":\"${ns_out}\"}"
@@ -279,11 +302,21 @@ collect_data() {
 
     # ── 3. ARP Table ──
     log_info "  Collecting ARP table..."
-    local arp_out=$(run_cmd "${ssh_prefix} arp -a")
+    local arp_out
+    if [[ -n "$ssh_prefix" ]]; then
+        arp_out=$(run_cmd "${ssh_prefix} arp -a")
+    else
+        arp_out=$(run_cmd "arp -a")
+    fi
 
     # ── 4. Routing Table ──
     log_info "  Collecting routing table..."
-    local route_out=$(run_cmd "${ssh_prefix} ip route")
+    local route_out
+    if [[ -n "$ssh_prefix" ]]; then
+        route_out=$(run_cmd "${ssh_prefix} ip route")
+    else
+        route_out=$(run_cmd "ip route")
+    fi
 
     # ── 5. Traceroute ──
     log_info "  Running traceroute..."
@@ -292,7 +325,11 @@ collect_data() {
     for i in "${!DOMAINS[@]}"; do
         domain="${DOMAINS[$i]}"
         log_info "    -> traceroute ${domain}"
-        tr_out=$(run_cmd "${ssh_prefix} traceroute -m ${TRACEROUTE_MAX_HOPS} -w ${TRACEROUTE_WAIT} ${domain}")
+        if [[ -n "$ssh_prefix" ]]; then
+            tr_out=$(run_cmd "${ssh_prefix} traceroute -m ${TRACEROUTE_MAX_HOPS} -w ${TRACEROUTE_WAIT} ${domain}")
+        else
+            tr_out=$(run_cmd "traceroute -m ${TRACEROUTE_MAX_HOPS} -w ${TRACEROUTE_WAIT} ${domain}")
+        fi
 
         sep=""; [[ $i -gt 0 ]] && sep=","
         traceroute_results="${traceroute_results}${sep}{\"domain\":\"${domain}\",\"output\":\"${tr_out}\"}"
@@ -305,7 +342,11 @@ collect_data() {
     for i in "${!DOMAINS[@]}"; do
         domain="${DOMAINS[$i]}"
         log_info "    -> openssl s_client ${domain}:443"
-        ssl_out=$(run_cmd "${ssh_prefix} bash -c 'echo | openssl s_client -connect ${domain}:443 -servername ${domain} 2>&1 | openssl x509 -noout -issuer -subject -dates 2>&1'")
+        if [[ -n "$ssh_prefix" ]]; then
+            ssl_out=$(run_cmd "${ssh_prefix} bash -c 'echo | openssl s_client -connect ${domain}:443 -servername ${domain} 2>&1 | openssl x509 -noout -issuer -subject -dates 2>&1'")
+        else
+            ssl_out=$(run_cmd "bash -c 'echo | openssl s_client -connect ${domain}:443 -servername ${domain} 2>&1 | openssl x509 -noout -issuer -subject -dates 2>&1'")
+        fi
 
         sep=""; [[ $i -gt 0 ]] && sep=","
         ssl_results="${ssl_results}${sep}{\"domain\":\"${domain}\",\"output\":\"${ssl_out}\"}"
@@ -318,7 +359,11 @@ collect_data() {
     for i in "${!DOMAINS[@]}"; do
         domain="${DOMAINS[$i]}"
         log_info "    -> whois ${domain}"
-        whois_out=$(run_cmd "${ssh_prefix} bash -c 'whois ${domain} 2>&1 | head -50'")
+        if [[ -n "$ssh_prefix" ]]; then
+            whois_out=$(run_cmd "${ssh_prefix} bash -c 'whois ${domain} 2>&1 | head -50'")
+        else
+            whois_out=$(run_cmd "bash -c 'whois ${domain} 2>&1 | head -50'")
+        fi
 
         sep=""; [[ $i -gt 0 ]] && sep=","
         whois_results="${whois_results}${sep}{\"domain\":\"${domain}\",\"output\":\"${whois_out}\"}"
@@ -332,7 +377,11 @@ collect_data() {
         segment="${SEGMENTS[$i]}"
         log_info "    -> scanning ${segment}"
         # -sn (Ping scan only), -PR (ARP ping), -T2 (Polite), --randomize-hosts, --data-length 16
-        scan_out=$(run_cmd "${ssh_prefix} command -v nmap &>/dev/null && sudo nmap -sn -PR -T2 --randomize-hosts --data-length 16 ${segment} | grep -E 'Nmap scan report for|MAC Address' || echo 'nmap not available or failed'")
+        if [[ -n "$ssh_prefix" ]]; then
+            scan_out=$(run_cmd "${ssh_prefix} bash -c 'command -v nmap &>/dev/null && sudo nmap -sn -PR -T2 --randomize-hosts --data-length 16 ${segment} 2>/dev/null | grep -E \"Nmap scan report for|MAC Address\" || echo nmap_not_available'")
+        else
+            scan_out=$(run_cmd "bash -c 'command -v nmap &>/dev/null && sudo nmap -sn -PR -T2 --randomize-hosts --data-length 16 ${segment} 2>/dev/null | grep -E \"Nmap scan report for|MAC Address\" || echo nmap_not_available'")
+        fi
 
         sep=""; [[ $i -gt 0 ]] && sep=","
         subnet_results="${subnet_results}${sep}{\"segment\":\"${segment}\",\"output\":\"${scan_out}\"}"
@@ -340,9 +389,13 @@ collect_data() {
 
     # ── 8. Open Ports (if nmap available) ──
     local nmap_out="nmap not available"
-    if ${ssh_prefix} command -v nmap &>/dev/null; then
+    if command -v nmap &>/dev/null; then
         log_info "  Scanning common ports with nmap..."
-        nmap_out=$(run_cmd "${ssh_prefix} nmap -sT -T4 --top-ports 100 localhost")
+        if [[ -n "$ssh_prefix" ]]; then
+            nmap_out=$(run_cmd "${ssh_prefix} nmap -sT -T4 --top-ports 100 localhost")
+        else
+            nmap_out=$(run_cmd "nmap -sT -T4 --top-ports 100 localhost")
+        fi
     else
         log_warn "  nmap not installed — skipping port scan"
     fi
@@ -350,10 +403,18 @@ collect_data() {
     # ── 9. Active Connections ──
     log_info "  Collecting active connections..."
     local netstat_out
-    if ${ssh_prefix} command -v ss &>/dev/null; then
-        netstat_out=$(run_cmd "${ssh_prefix} ss -tunapl")
+    if command -v ss &>/dev/null; then
+        if [[ -n "$ssh_prefix" ]]; then
+            netstat_out=$(run_cmd "${ssh_prefix} ss -tunapl")
+        else
+            netstat_out=$(run_cmd "ss -tunapl")
+        fi
     else
-        netstat_out=$(run_cmd "${ssh_prefix} netstat -tunapl")
+        if [[ -n "$ssh_prefix" ]]; then
+            netstat_out=$(run_cmd "${ssh_prefix} netstat -tunapl")
+        else
+            netstat_out=$(run_cmd "netstat -tunapl")
+        fi
     fi
 
     # ── Build JSON segments/gateways arrays ──
@@ -486,7 +547,7 @@ main() {
     if [[ "$MODE" != "remote-only" ]]; then
         OUTPUT_FILE="${OUTPUT_DIR}/audit_output.json"
         collect_data "local" "" "$OUTPUT_FILE"
-        ((total_hosts++))
+        ((total_hosts++)) || true
     fi
 
     # ── Remote Collection ──
@@ -504,7 +565,7 @@ main() {
             if ${ssh_cmd} "echo ok" &>/dev/null; then
                 local remote_output="${OUTPUT_DIR}/audit_output_${host_label}.json"
                 collect_data "${host_label}" "${ssh_cmd}" "$remote_output"
-                ((total_hosts++))
+                ((total_hosts++)) || true
             else
                 log_error "Cannot connect to ${user_host} — skipping"
             fi
