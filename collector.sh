@@ -372,15 +372,27 @@ collect_data() {
     # ── 7.5 Subnet Discovery (Evasive) ──
     log_info "  Running stealth subnet discovery..."
     local subnet_results=""
+    local my_seg="${MACHINE_IP%.*}"  # e.g. "192.168.4" from "10.0.5.50"
 
     for i in "${!SEGMENTS[@]}"; do
         segment="${SEGMENTS[$i]}"
-        log_info "    -> scanning ${segment}"
-        # -sn (Ping scan only), -PR (ARP ping), -T2 (Polite), --randomize-hosts, --data-length 16
-        if [[ -n "$ssh_prefix" ]]; then
-            scan_out=$(run_cmd "${ssh_prefix} bash -c 'command -v nmap &>/dev/null && sudo nmap -sn -PR -T2 --randomize-hosts --data-length 16 ${segment} 2>/dev/null | grep -E \"Nmap scan report for|MAC Address\" || echo nmap_not_available'")
+        local seg_prefix="${segment%%.0*}"  # e.g. "192.168.4" from "10.0.5.0/24"
+
+        # Use ARP (-PR) for local subnet, ICMP (-PE) for remote subnets
+        local scan_method
+        if [[ "$seg_prefix" == "$my_seg" ]]; then
+            scan_method="-PR"
+            log_info "    -> ARP scan ${segment} (local segment)"
         else
-            scan_out=$(run_cmd "bash -c 'command -v nmap &>/dev/null && sudo nmap -sn -PR -T2 --randomize-hosts --data-length 16 ${segment} 2>/dev/null | grep -E \"Nmap scan report for|MAC Address\" || echo nmap_not_available'")
+            scan_method="-PE"
+            log_info "    -> ICMP scan ${segment} (remote segment)"
+        fi
+
+        # -T3 (Normal), --max-rate 50, timeout 90s
+        if [[ -n "$ssh_prefix" ]]; then
+            scan_out=$(run_cmd "${ssh_prefix} bash -c 'command -v nmap &>/dev/null && timeout 90 sudo nmap -sn ${scan_method} -T3 --max-rate 50 --randomize-hosts --data-length 16 ${segment} 2>/dev/null | grep -E \"Nmap scan report for|MAC Address\" || echo nmap_not_available'")
+        else
+            scan_out=$(run_cmd "bash -c 'command -v nmap &>/dev/null && timeout 90 sudo nmap -sn ${scan_method} -T3 --max-rate 50 --randomize-hosts --data-length 16 ${segment} 2>/dev/null | grep -E \"Nmap scan report for|MAC Address\" || echo nmap_not_available'")
         fi
 
         sep=""; [[ $i -gt 0 ]] && sep=","
