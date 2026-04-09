@@ -25,7 +25,10 @@ DEFAULT_BASELINE = {
         "QuoVadis", "SwissSign", "T-Systems", "Certum", "IdenTrust",
         "Trustwave", "SSL.com", "ZeroSSL", "USERTrust",
         "CloudFlare", "Cloudflare", "Apple", "Meta", "Facebook",
-        "WhatsApp", "Fastly", "Akamai",
+        "WhatsApp", "Fastly", "Akamai", "Certainly",
+    ],
+    "external_services": [
+        "web.whatsapp.com", "www.facebook.com", "open.spotify.com", "google.com",
     ],
     "latency_spike_threshold_ms": 100,
 }
@@ -91,6 +94,10 @@ def load_yaml_config(config_path):
     # Known CAs
     if cfg.get("known_cas"):
         baseline["known_cas"] = cfg["known_cas"]
+
+    # External services (cert expiry suppressed for these)
+    if cfg.get("external_services"):
+        baseline["external_services"] = cfg["external_services"]
 
     # Thresholds
     thresholds = cfg.get("thresholds", {})

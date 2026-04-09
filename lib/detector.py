@@ -212,10 +212,13 @@ class AnomalyDetector:
 
     # ── Rule 8: Certificate expiry warning ──
     def check_cert_expiry(self):
-        import re
         from datetime import datetime, timezone
+        external = [e.lower() for e in self.baseline.get("external_services", [])]
         for entry in self.data.get("ssl_certificates", []):
             domain = entry.get("domain", "")
+            # Skip external services — we can't renew their certs
+            if any(ext in domain.lower() for ext in external):
+                continue
             output = entry.get("output", "")
             m = re.search(r'notAfter\s*=\s*(.+?)(?:\\n|\n|$)', output)
             if not m:
@@ -323,7 +326,7 @@ class AnomalyDetector:
             ("Open Port Analysis",           self.check_open_ports),
             ("Stealth Rogue Device Check",   self.check_rogue_devices),
         ]
-        print("\n[*] Running anomaly detection (11 rules)...\n")
+        print("\n[*] Running anomaly detection (12 rules)...\n")
         for name, fn in rules:
             print(f"  > {name}...")
             try:
